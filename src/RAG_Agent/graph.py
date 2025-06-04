@@ -6,18 +6,19 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import MessagesState
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode # We will replace this for retrieve
 from langgraph.prebuilt import tools_condition
 from langchain.tools.retriever import create_retriever_tool
 from langchain_community.vectorstores import FAISS
 from pydantic import BaseModel, Field
 from typing import Literal, List, Dict, Any
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 import numpy as np
 
+# Load environment variables
 load_dotenv()
 
+# --- Environment Variable Check ---
 required_vars = [
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_CLOUD_PROJECT",
@@ -35,6 +36,7 @@ print(f"Credentials file: {os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
 # Set up local FAISS directory
 FAISS_INDEX_PATH = "./faiss_index"
 
+# --- Vector Store and Embeddings Setup ---
 def load_or_create_vectorstore():
     """Load existing FAISS index or create a new one with optimized chunking."""
     
@@ -62,9 +64,9 @@ def load_or_create_vectorstore():
     
     # Create new FAISS index with better chunking strategy
     urls = [
-        "https://lilianweng.github.io/posts/2024-11-28-reward-hacking/",
-        "https://lilianweng.github.io/posts/2024-07-07-hallucination/",
-        "https://lilianweng.github.io/posts/2024-04-12-diffusion-video/",
+        "[https://lilianweng.github.io/posts/2024-11-28-reward-hacking/](https://lilianweng.github.io/posts/2024-11-28-reward-hacking/)",
+        "[https://lilianweng.github.io/posts/2024-07-07-hallucination/](https://lilianweng.github.io/posts/2024-07-07-hallucination/)",
+        "[https://lilianweng.github.io/posts/2024-04-12-diffusion-video/](https://lilianweng.github.io/posts/2024-04-12-diffusion-video/)",
     ]
     
     print("Loading documents from URLs...")
@@ -175,19 +177,6 @@ retriever = vectorstore.as_retriever(
     }
 )
 
-# Create retriever tool with enhanced description
-retriever_tool = create_retriever_tool(
-    retriever,
-    "retrieve_blog_posts",
-    """Search and return comprehensive information about Lilian Weng's blog posts covering:
-    - Reward hacking in AI systems and alignment
-    - Hallucination in large language models
-    - Diffusion models for video generation
-    - Machine learning concepts, techniques, and research
-    - AI safety and alignment topics
-    This tool provides detailed technical information from authoritative blog posts.""",
-)
-
 # Initialize Vertex AI models with better configuration
 response_model = ChatVertexAI(
     model_name="gemini-2.0-flash",
@@ -195,25 +184,21 @@ response_model = ChatVertexAI(
     max_output_tokens=2048,  # Allow longer responses
 )
 
-# Enhanced MessagesState to track additional information
+# --- Enhanced MessagesState ---
 class EnhancedMessagesState(MessagesState):
     """Enhanced state to track retrieved documents and other metadata."""
-    retrieved_docs: List[str] = Field(default_factory=list)
+    retrieved_docs: List[str] = Field(default_factory=list) # Store page_content as strings
     retrieved_sources: List[str] = Field(default_factory=list)
-    original_question: str = "" # This will now be set once per top-level query
+    original_question: str = ""
     rewrite_count: int = 0
     confidence_score: float = 0.0
 
+# --- Graph Nodes ---
 def generate_query_or_respond(state: EnhancedMessagesState):
     """
     Enhanced query processing with better tool use detection.
     """
-    print("🤖 Processing user query...")
-    
-    # The original_question should be set when the graph is *invoked*
-    # For now, we assume it's passed in the initial state or is the first HumanMessage.
-    # We will rely on the caller to set original_question for each new query.
-    # If this node is reached via a rewrite, original_question should already be set.
+    print("Processing user query...")
     
     # Ensure original_question is set from the initial human message if not already present
     if not state.get("original_question"):
@@ -229,27 +214,82 @@ When a user asks questions about:
 - AI safety, alignment, or reward hacking
 - Language model hallucinations
 - Diffusion models or video generation
-- Machine learning techniques and research
+- Machine learning concepts, techniques, and research
 - AI safety and alignment topics
 
 You should ALWAYS use the retrieve_blog_posts tool to get accurate, up-to-date information from the knowledge base.
 
 If the question is completely unrelated to AI/ML topics (like cooking recipes, sports scores, etc.), you can respond directly without using tools."""
     
+    # Dynamically bind the retriever tool here, as it might be updated
+    # in `update_vectorstore_with_new_urls`
+    _retriever_tool = create_retriever_tool(
+        retriever, # Use the global retriever instance
+        "retrieve_blog_posts",
+        """Search and return comprehensive information about Lilian Weng's blog posts covering:
+        - Reward hacking in AI systems and alignment
+        - Hallucination in large language models
+        - Diffusion models for video generation
+        - Machine learning concepts, techniques, and research
+        - AI safety and alignment topics
+        This tool provides detailed technical information from authoritative blog posts.""",
+    )
+
     messages_to_send_to_llm = [SystemMessage(content=system_prompt)] + state["messages"]
 
     response = (
         response_model
-        .bind_tools([retriever_tool])
+        .bind_tools([_retriever_tool]) # Bind the tool here
         .invoke(messages_to_send_to_llm)
     )
     
     if hasattr(response, 'tool_calls') and response.tool_calls:
-        print("🔍 Query requires document retrieval")
+        print("Query requires document retrieval")
     else:
-        print("💭 Query answered directly without retrieval")
+        print("Query answered directly without retrieval")
     
     return {"messages": [response]}
+
+
+def retrieve_documents_node(state: EnhancedMessagesState):
+    """
+    Retrieves documents using the global retriever and stores them in state.
+    This replaces the ToolNode for retrieval to allow structured state updates.
+    """
+    print("Retrieving documents using the retriever...")
+    
+    # Get the latest human message, which is the current query (original or rewritten)
+    current_question = ""
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage):
+            current_question = msg.content
+            break
+    
+    if not current_question:
+        print("Error: No current question found for retrieval.")
+        # Return an empty list of docs and let grading handle it
+        return {"retrieved_docs": [], "retrieved_sources": [], "messages": []}
+
+    try:
+        docs = retriever.get_relevant_documents(current_question)
+        
+        retrieved_docs_content = [doc.page_content for doc in docs]
+        retrieved_sources = [doc.metadata.get('source', 'N/A') for doc in docs]
+        
+        print(f"Successfully retrieved {len(docs)} documents.")
+        
+        # Store the actual document contents and sources in the state
+        # for subsequent nodes to use.
+        return {
+            "retrieved_docs": retrieved_docs_content,
+            "retrieved_sources": retrieved_sources,
+            # Add a message to the history indicating tool use result
+            "messages": [AIMessage(content="Documents retrieved for the query.")]
+        }
+    except Exception as e:
+        print(f"Error during document retrieval: {e}")
+        return {"retrieved_docs": [], "retrieved_sources": [], "messages": []}
+
 
 # Enhanced document grading with more sophisticated evaluation
 GRADE_PROMPT = """You are an expert document relevance evaluator for AI and machine learning content. 
@@ -300,83 +340,33 @@ grader_model = ChatVertexAI(
 def grade_documents(state: EnhancedMessagesState) -> Literal["generate_answer", "rewrite_question"]:
     """
     Enhanced document grading with better evaluation logic.
+    This now correctly accesses `state["retrieved_docs"]`.
     """
-    print("📊 Grading document relevance...")
+    print("Grading document relevance...")
     
-    # Get the original question
     question = state.get("original_question", "")
+    retrieved_docs_content = state.get("retrieved_docs", []) # Now correctly List[str]
+    retrieved_sources = state.get("retrieved_sources", []) # Now correctly List[str]
     
-    # Extract retrieved documents from tool messages
-    retrieved_docs = []
-    retrieved_sources = [] # Initialize retrieved_sources list
-    
-    for message in state["messages"]:
-        if isinstance(message, ToolMessage):
-            # The content of a ToolMessage is the result of the tool execution.
-            # For your retriever tool, this content will be a string representation
-            # of the retrieved documents.
-            retrieved_docs.append(message.content)
-            
-            # Extract source information if available within the ToolMessage's content
-            # or additional_kwargs, depending on how your retriever tool structures it.
-            # Langchain's create_retriever_tool typically puts source in additional_kwargs.
-            if hasattr(message, 'additional_kwargs') and 'source' in message.additional_kwargs:
-                # This part depends on how your retriever actually returns sources.
-                # If it's a list of dicts with 'source' key, you'd iterate.
-                # For now, assuming it's directly accessible or needs more parsing.
-                # If your tool returns a list of Document objects, you'd iterate those.
-                # Example: If message.content was a list of Document objects, you'd do:
-                # for doc in message.content:
-                #     retrieved_sources.append(doc.metadata.get('source'))
-                
-                # A more robust way to get sources if the ToolNode returns Document objects
-                # is to iterate the parsed content, not the raw string content.
-                # The current setup `retrieved_docs.append(message.content)` assumes content is a string.
-                # If ToolNode directly returned Document objects, message.content would be a list of Document.
-                # Let's refine based on the expected output of `ToolNode([retriever_tool])`
-                pass # The current `retrieved_docs.append(message.content)` gets the full string output.
-                     # Sources are typically part of the Document object's metadata.
-                     # If the `ToolNode` wraps individual Document objects in its output,
-                     # you might need to parse `message.content` more thoroughly.
-                     # However, for simplicity and typical Langchain behavior, the `message.content`
-                     # from a retriever tool often combines all document contents into one string.
-                     # To get individual sources, we need to access the original Document objects.
-                     # The `ToolNode` usually passes the *raw* output of the tool.
-                     # Let's assume for a moment that `retriever_tool` returns a list of Document objects,
-                     # and the `ToolNode` converts it to a string for `message.content`.
-                     # If so, you'd need a more complex parsing or rely on the agent to structure it.
-
-                     # For now, we'll keep `retrieved_sources` as it is, assuming your `retriever_tool`
-                     # isn't explicitly putting structured sources into `ToolMessage.additional_kwargs`
-                     # in a way that's easily extracted here without more parsing.
-                     # If your `retriever_tool` actually returns structured Document objects,
-                     # you'd need to modify `retrieve` node to store them in a structured way in the state,
-                     # or parse `message.content` here.
-    
-    if not retrieved_docs:
-        print("❌ No retrieved documents found")
+    if not retrieved_docs_content:
+        print("No retrieved documents found for grading. Suggesting rewrite.")
         return "rewrite_question"
-    
-    # Store retrieved docs and sources in state
-    state["retrieved_docs"] = retrieved_docs
-    # You might want to update state["retrieved_sources"] if you manage to extract them.
-    # For now, it will remain an empty list if not explicitly populated.
     
     # Create context preview for evaluation
     context_preview = []
     total_chars = 0
-    for i, doc in enumerate(retrieved_docs):
-        preview = doc[:200] + "..." if len(doc) > 200 else doc
+    for i, doc_content in enumerate(retrieved_docs_content):
+        preview = doc_content[:200] + "..." if len(doc_content) > 200 else doc_content
         context_preview.append(f"Doc {i+1}: {preview}")
-        total_chars += len(doc)
+        total_chars += len(doc_content)
     
-    print(f"📋 Evaluating {len(retrieved_docs)} documents ({total_chars} total chars)")
-    print(f"📋 Question: {question[:150]}...")
+    print(f"Evaluating {len(retrieved_docs_content)} documents ({total_chars} total chars)")
+    print(f"Question: {question[:150]}...")
     
     prompt = GRADE_PROMPT.format(
         question=question,
         context_preview="\n".join(context_preview),
-        total_docs=len(retrieved_docs),
+        total_docs=len(retrieved_docs_content),
         total_chars=total_chars
     )
     
@@ -394,22 +384,23 @@ def grade_documents(state: EnhancedMessagesState) -> Literal["generate_answer", 
         # Store confidence in state
         state["confidence_score"] = confidence
         
-        print(f"📋 Relevance: {score} (confidence: {confidence:.2f})")
-        print(f"📋 Reasoning: {reasoning}")
+        print(f"Relevance: {score} (confidence: {confidence:.2f})")
+        print(f"Reasoning: {reasoning}")
         
         if score == "yes":
-            print("✅ Documents are relevant - generating answer")
+            print("Documents are relevant - generating answer")
             return "generate_answer"
         else:
-            print("❌ Documents not relevant - checking rewrite options")
+            print("Documents not relevant - checking rewrite options")
             rewrite_count = state.get("rewrite_count", 0)
-            if rewrite_count >= 2:
-                print("⚠️ Max rewrites reached - generating answer with available context")
+            if rewrite_count >= 2: # Max 2 rewrites
+                print("Max rewrites reached - generating answer with available context")
                 return "generate_answer"
             return "rewrite_question"
             
     except Exception as e:
-        print(f"❌ Error in document grading: {e}")
+        print(f"Error in document grading: {e}")
+        # Fallback in case of grading error
         return "generate_answer"
 
 # Enhanced question rewriting with more sophisticated strategies
@@ -441,7 +432,7 @@ def rewrite_question(state: EnhancedMessagesState):
     """
     Enhanced question rewriting with different strategies per attempt.
     """
-    print("✏️ Rewriting question for better retrieval...")
+    print("Rewriting question for better retrieval...")
     
     rewrite_count = state.get("rewrite_count", 0) + 1
     state["rewrite_count"] = rewrite_count
@@ -471,8 +462,8 @@ def rewrite_question(state: EnhancedMessagesState):
     
     response = response_model.invoke([{"role": "user", "content": prompt}])
     
-    print(f"📝 Original: {question}")
-    print(f"📝 Rewritten (attempt {rewrite_count}): {response.content}")
+    print(f"Original: {question}")
+    print(f"Rewritten (attempt {rewrite_count}): {response.content}")
     
     # Crucially, the rewritten question should be added as a *new HumanMessage*
     # to the state, so the next `query_handler` uses it for tool binding.
@@ -512,59 +503,62 @@ Generate your comprehensive response:"""
 def generate_answer(state: EnhancedMessagesState):
     """
     Enhanced answer generation with comprehensive context utilization.
+    Also, resets relevant state variables for the next independent query.
     """
-    print("📖 Generating comprehensive answer from retrieved documents...")
-    
+    print("Generating comprehensive answer from retrieved documents...")
+
     question = state.get("original_question", "")
-    retrieved_docs = state.get("retrieved_docs", [])
+    retrieved_docs_content = state.get("retrieved_docs", []) # This will now be List[str]
     confidence = state.get("confidence_score", 0.0)
-    
-    if not retrieved_docs:
-        print("WARNING: No retrieved documents found during answer generation. Proceeding with limited context.")
-        # This case should ideally be caught earlier by grade_documents, but as a fallback.
-        # Fallback: extract from tool messages if retrieved_docs wasn't set earlier
-        for message in state["messages"]:
-            if isinstance(message, ToolMessage):
-                retrieved_docs.append(message.content)
-    
-    # Prepare context with document numbering for better organization
-    if retrieved_docs:
+
+    if not retrieved_docs_content:
+        print("WARNING: No retrieved documents found during answer generation. Providing a general answer.")
+        context = "No specific documents were retrieved to answer this question. Providing a general response based on my training data."
+        total_chars = 0
+        num_docs = 0
+    else:
         context_parts = []
         total_chars = 0
-        for i, doc in enumerate(retrieved_docs, 1):
-            context_parts.append(f"Document {i}:\n{doc}")
-            total_chars += len(doc)
+        for i, doc_content in enumerate(retrieved_docs_content, 1):
+            context_parts.append(f"Document {i}:\n{doc_content}")
+            total_chars += len(doc_content)
         context = "\n\n" + "="*50 + "\n\n".join(context_parts)
-    else:
-        context = "No specific documents retrieved."
-        total_chars = 0
-    
+        num_docs = len(retrieved_docs_content)
+
     prompt = GENERATE_PROMPT.format(
         question=question,
-        num_docs=len(retrieved_docs),
+        num_docs=num_docs,
         total_chars=total_chars,
         context=context
     )
-    
+
     # Use higher temperature for more comprehensive responses
     enhanced_model = ChatVertexAI(
         model_name="gemini-2.0-flash",
         temperature=0.2, # Slightly higher temperature for more comprehensive response
         max_output_tokens=2048,
     )
-    
+
     response = enhanced_model.invoke([{"role": "user", "content": prompt}])
+
+    print(f"Comprehensive answer generated (confidence: {confidence:.2f})")
     
-    print(f"✅ Comprehensive answer generated (confidence: {confidence:.2f})")
-    # Reset rewrite_count for the next independent query
+    # --- IMPORTANT: Reset state variables for the next independent query ---
+    # This reset happens after the response is generated, ensuring that a fresh
+    # state is available for the next user query.
     state["rewrite_count"] = 0
-    state["original_question"] = "" # Clear original_question for the next independent query
-    
+    state["original_question"] = ""
+    state["retrieved_docs"] = [] # Clear retrieved documents
+    state["retrieved_sources"] = [] # Clear retrieved sources
+    state["confidence_score"] = 0.0 # Reset confidence
+    # -------------------------------------------------------------------
+
     return {"messages": [response]}
+
 
 def update_vectorstore_with_new_urls(new_urls):
     """Update the vectorstore with new URLs using enhanced chunking."""
-    global vectorstore, retriever, retriever_tool
+    global vectorstore, retriever
     
     vectorstore = add_documents_to_vectorstore(vectorstore, new_urls)
     
@@ -578,40 +572,34 @@ def update_vectorstore_with_new_urls(new_urls):
         }
     )
     
-    # Update retriever tool
-    retriever_tool = create_retriever_tool(
-        retriever,
-        "retrieve_blog_posts",
-        """Search and return comprehensive information about Lilian Weng's blog posts covering:
-        - Reward hacking in AI systems and alignment
-        - Hallucination in large language models  
-        - Diffusion models for video generation
-        - Machine learning concepts, techniques, and research
-        - AI safety and alignment topics
-        This tool provides detailed technical information from authoritative blog posts.""",
-    )
+    print("Vectorstore updated and retriever reinitialized.")
 
-# Assemble the Enhanced RAG Agent Graph
+
+# --- Assemble the Enhanced RAG Agent Graph ---
 workflow = StateGraph(EnhancedMessagesState)
 
 # Add nodes
 workflow.add_node("query_handler", generate_query_or_respond)
-workflow.add_node("retrieve", ToolNode([retriever_tool]))
+workflow.add_node("retrieve", retrieve_documents_node) # Custom node for retrieval
 workflow.add_node("rewrite_question", rewrite_question)
 workflow.add_node("generate_answer", generate_answer)
 
 # Define workflow edges
 workflow.add_edge(START, "query_handler")
 
+# Conditional edge from query_handler:
+# If tool is called, go to "retrieve" (our custom retrieve node).
+# Otherwise (LLM answers directly), go to END.
 workflow.add_conditional_edges(
     "query_handler",
     tools_condition,
     {
-        "tools": "retrieve",
+        "tools": "retrieve", # This now points to our custom retrieve_documents_node
         END: END, # If no tool is called, the LLM directly answered, so end.
     },
 )
 
+# After retrieval, grade the documents
 workflow.add_conditional_edges(
     "retrieve",
     grade_documents,
