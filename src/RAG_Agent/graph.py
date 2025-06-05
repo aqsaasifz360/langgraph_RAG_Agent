@@ -64,9 +64,16 @@ def load_or_create_vectorstore():
     
     # Create new FAISS index with better chunking strategy
     urls = [
-        "[https://lilianweng.github.io/posts/2024-11-28-reward-hacking/](https://lilianweng.github.io/posts/2024-11-28-reward-hacking/)",
-        "[https://lilianweng.github.io/posts/2024-07-07-hallucination/](https://lilianweng.github.io/posts/2024-07-07-hallucination/)",
-        "[https://lilianweng.github.io/posts/2024-04-12-diffusion-video/](https://lilianweng.github.io/posts/2024-04-12-diffusion-video/)",
+        "https://lilianweng.github.io/posts/2024-11-28-reward-hacking/",
+    "https://lilianweng.github.io/posts/2024-07-07-hallucination/",
+    "https://lilianweng.github.io/posts/2024-04-12-diffusion-video/",
+    "https://lilianweng.github.io/posts/2023-06-23-agent/",
+    "https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/",
+    "https://lilianweng.github.io/posts/2022-02-20-how-to-read-paper/",
+    "https://lilianweng.github.io/posts/2021-07-11-diffusion-models/",
+    "https://lilianweng.github.io/posts/2021-05-31-contrastive/",
+    "https://lilianweng.github.io/posts/2020-04-07-the-transformer-family/",
+    "https://lilianweng.github.io/posts/2019-01-31-generalized-language-models/",
     ]
     
     print("Loading documents from URLs...")
@@ -80,8 +87,8 @@ def load_or_create_vectorstore():
     
     # Strategy 1: Larger chunks for context (512 tokens)
     text_splitter_large = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=512,
-        chunk_overlap=100,
+        chunk_size=1200,
+        chunk_overlap=300,
         separators=["\n\n", "\n", ". ", "! ", "? ", " "]
     )
     large_splits = text_splitter_large.split_documents(docs_list)
